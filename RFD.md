@@ -40,16 +40,14 @@ The following could be implemented in a real production application, but are out
 
 ### CLI
 
-Users will be able to run a CLI proggram that will manage jobs on a remote Linux system. This CLI tool will be called `rps` and will have the following commands:
+Users will be able to run a CLI program that will manage jobs on a remote Linux system. This CLI tool will be called `rps` and will have the following commands:
 
-- `rps connect <host>`: Connect to the remote Linux system
-  - starts an interactive subshell where the following commands can be executed:
-  - `rps start -c "<command>"`: Start a new job with the given command and return the job_id
-  - `rps status <job_id>`: Get the status of the job with the given job_id
-  - `rps output <job_id>`: Stream the output of the job with the given job_id
-  - `rps stop <job_id>`: Stop a running job with the given job_id
+- `rps start -h <host> -c "<command>"`: Start a new job with the given command and return the job_id
+- `rps status -h <host> <job_id>`: Get the status of the job with the given job_id
+- `rps output -h <host> <job_id>`: Stream the output of the job with the given job_id
+- `rps stop -h <host> <job_id>`: Stop a running job with the given job_id
 
-A subshell was chosen so that the hostname/IP address of the server is preserved across subsequent commands without having to re-enter it
+The host can also be specified via the environment variable `RPS_HOST` to avoid having to specify it as CLI argument.
 
 `job_id` is a unique identifier for a job, implemented as a UUID.
 
@@ -80,7 +78,7 @@ Job 12345678-1234-1234-1234-123456789012 is stopped
 
 Authentication will be handled using mTLS. TLS 1.3 with `TLS_AES_256_GCM_SHA384` cipher suite will be used for maximum security.
 
-For simplicity, the certificates (CA, server, client) will be generated and checked into source. In a real application, the certificates should be generated and stored in a secure manner.
+For simplicity, the certificates (CA, server, client) will be generated using `openssl` with the `Ed25519` algorithm and checked into source. In a real application, the certificates should be generated and stored in a secure manner.
 
 #### Authorization
 
@@ -109,9 +107,9 @@ The library will implement the business logic for the API, interacting with the 
 1. Start Job
     - process is assigned a job ID (UUID) and added to an in-memory process map
     - output file is created, identified by the job ID
-    - process is started as a child process in user mode
-    - process output is redirected to the output file
-    - process is added to the cgroup
+    - process is started as a child process in user mode under `rpsuser`
+      - process output is redirected to the output file on process start
+      - process is added to the cgroup on process start using the linux `cgexec` utility, which will allow running a process directly within a specified control group without having to manually add it
 2. Job Running
     - process status can be queried by accessing the process map
     - process output can be streamed by reading the output file
@@ -143,18 +141,19 @@ _Note:_ In a production system, we would want a more sophisticated output file m
 
 Output files will be created by the `root` user with 600 permissions. The `rpsuser` running jobs will not have write access to any output file, in order to prevent users from messing with these files. Instead, the server will pass an open file descriptor to the child process, which will write to the output file.
 
+If a user reads output via `rps output` while a process is runnning, the stream will remain open as long as the process is running. Once the process exits, the output file will be closed and all reading streams will be closed as well.
+
 #### Resource Control
 
 Resource control will be implemented using cgroups. 
 
-- cgroups V1 & V2 will both be supported
+- only cgroups V2 will be supported
 - cgroup setup will be run in priveleged mode on server startup
 - CPU, Memory, Disk IO, and number of PIDs will be limited. 
   - Limit values will be hard-coded for simplicity
     - _In production, these values should be set by a configuration system such as a config file setting environment variables_
 - Resource limits will be defined per job to ensure that rouge jobs do not affect other jobs
-  - For cgroups V2, naming convention will be `/sys/fs/cgroup/rpsmanager/<job_id>`
-  - For cgroups V1, naming convention will be `/sys/fs/cgroup/cpu|memory|.../rpsmanager/<job_id>`
+  - Naming convention will be `/sys/fs/cgroup/rpsmanager/<job_id>`
 - Limits will be set during cgroup creation by writing to the cgroup files _(no third-party libraries used)_
 - Job cgroup will be deleted by the SIGCHLD handler when the process terminates
 
