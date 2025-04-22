@@ -42,33 +42,30 @@ The following could be implemented in a real production application, but are out
 
 Users will be able to run a CLI program that will manage jobs on a remote Linux system. This CLI tool will be called `rps` and will have the following commands:
 
-- `rps start -h <host> -c "<command>"`: Start a new job with the given command and return the job_id
-- `rps status -h <host> <job_id>`: Get the status of the job with the given job_id
-- `rps output -h <host> <job_id>`: Stream the output of the job with the given job_id
-- `rps stop -h <host> <job_id>`: Stop a running job with the given job_id
+- `rps start -c "<command>"`: Start a new job with the given command and return the job_id
+- `rps status <job_id>`: Get the status of the job with the given job_id
+- `rps output <job_id>`: Stream the output of the job with the given job_id
+- `rps stop <job_id>`: Stop a running job with the given job_id
 
-The host can also be specified via the environment variable `RPS_HOST` to avoid having to specify it as CLI argument.
+The hostname/IP address will be hard-coded for simplicity
 
 `job_id` is a unique identifier for a job, implemented as a UUID.
 
 Here are some examples of how the CLI will work:
 
 ```sh
-$ rps connect 158.101.135.237
-Connected to Remote Linux Process Manager at 158.101.135.237
-(enter "help" for usage)
-> rps start -c "for i in {1..10}; do echo $i; sleep 1; done"
+$ rps start -c "for i in {1..10}; do echo $i; sleep 1; done"
 Job started with job_id: 12345678-1234-1234-1234-123456789012
-> rps status 12345678-1234-1234-1234-123456789012
+$ rps status 12345678-1234-1234-1234-123456789012
 Job 12345678-1234-1234-1234-123456789012 is running
 - started: 2025-04-20 12:31:45 -0500 CDT
 - command: "for i in {1..10}; do echo $i; sleep 1; done"
-> rps output 12345678-1234-1234-1234-123456789012
+$ rps output 12345678-1234-1234-1234-123456789012
 1
 2
 3
 4
-> rps stop 12345678-1234-1234-1234-123456789012
+$ rps stop 12345678-1234-1234-1234-123456789012
 Job 12345678-1234-1234-1234-123456789012 is stopped
 ```
 
@@ -95,6 +92,80 @@ Users (clients) will be assigned one of these two roles in a hard-coded map for 
 
 The API will be a gRPC server that handles messages from the CLI. Protocol Buffers (protobuf) will be used to define and serialize the methods and messages, which will provide consistency between the gRPC server and client.
 
+The following proto interface will be used:
+```proto
+// Service definition for the Remote Process Service (RPS)
+service RpsService {
+  // Starts a new job with the given command.
+  rpc Start(StartRequest) returns (StartResponse);
+
+  // Gets the status of a specific job.
+  rpc Status(StatusRequest) returns (StatusResponse);
+
+  // Streams the output of a specific job.
+  rpc Output(OutputRequest) returns (stream OutputResponse);
+
+  // Stops a running job.
+  rpc Stop(StopRequest) returns (StopResponse);
+}
+
+// Request message for starting a job.
+message StartRequest {
+  string command = 1; // The command to execute for the job.
+}
+
+// Response message for starting a job.
+message StartResponse {
+  string job_id = 1; // The unique identifier (UUID) for the started job.
+  string error_message = 2; // Error message if the job failed to start.
+}
+
+// Enum representing the possible statuses of a job.
+enum JobStatus {
+  UNKNOWN = 0;
+  RUNNING = 1;
+  STOPPED = 2;
+  ERROR = 3; // Represents a job that terminated with an error.
+}
+
+// Request message for getting the status of a job.
+message StatusRequest {
+  string job_id = 1; // The unique identifier (UUID) of the job.
+}
+
+// Response message containing the status of a job.
+message StatusResponse {
+  string job_id = 1;                      // The unique identifier (UUID) of the job.
+  JobStatus status = 2;                   // The current status of the job.
+  google.protobuf.Timestamp start_time = 3; // The time the job was started.
+  string command = 4;                     // The command executed by the job.
+  int32 exit_code = 5;                    // The exit code if the job has stopped or errored. Only meaningful if status is STOPPED or ERROR.
+  string error_message = 6;               // Error message if the job has errored.
+}
+
+// Request message for streaming the output of a job.
+message OutputRequest {
+  string job_id = 1; // The unique identifier (UUID) of the job.
+}
+
+// Response message containing a chunk of job output.
+message OutputResponse {
+  bytes data = 1; // A chunk of the job's stdout or stderr output.
+  string error_message = 2; // Error message if the output streaming failed.
+}
+
+// Request message for stopping a job.
+message StopRequest {
+  string job_id = 1; // The unique identifier (UUID) of the job to stop.
+}
+
+// Response message for stopping a job.
+message StopResponse {
+  bool success = 1; // Whether the job stopping was successful.
+  string error_message = 2; // Error message if the job stopping failed.
+}
+```
+
 ### Library
 
 The library will implement the business logic for the API, interacting with the linux system to start, stop, and manage jobs.
@@ -106,23 +177,22 @@ The library will implement the business logic for the API, interacting with the 
     - SIGCHLD handler is set up to handle process termination (asynchronously)
 1. Start Job
     - process is assigned a job ID (UUID) and added to an in-memory process map
+    - cgroup directory is created for the job, identified by the job ID
     - output file is created, identified by the job ID
-    - process is started as a child process in user mode under `rpsuser`
-      - process output is redirected to the output file on process start
-      - process is added to the cgroup on process start using the linux `cgexec` utility, which will allow running a process directly within a specified control group without having to manually add it
+    - process is started as a child process
+      - process output (stdout+stderr) is redirected to the output file on process start
+      - process is added to the cgroup on process start using the `CLONE_NEWCGROUP` flag with the `os/exec` library
 2. Job Running
     - process status can be queried by accessing the process map
     - process output can be streamed by reading the output file
 3. Stop Job
+    - if a stop process request comes in, send `SIGTERM` signal to the process PID, wait 10 seconds, then send `SIGKILL` if not terminated
     - when process ends, the SIGCHLD handler will be invoked
     - process map status is updated (checking status will say `stopped`)
-    - output file cleanup is scheduled for 1 hour after process end
 
 As mentioned `job_id` will be a UUID, which is unique and less likely to be reused than a PID. This will allow us to distinguish between processes that had the same PID when getting the status/output of a job.
 
-The asynchronous SIGCHLD handler will avoid blocking the main thread and will ensure that the process terminates immediately and gracefully (no zombie state) and invoke cleanup.
-
-Processes will be run by a dedicated non-sudoer user (e.g. `rpsuser`) to ensure that jobs are not run as root or sudo. This will be a different user than the API server user, which will be run as `root` to be able to manage cgroups. `rpsuser` will not have any permissions to server code or output files (more deails below)
+The asynchronous SIGCHLD handler will avoid blocking the main thread and will ensure that the process terminates immediately and gracefully (no zombie state.)
 
 #### Output Streaming
 
@@ -135,13 +205,16 @@ Process output will be streamed to a disk file identified by the job ID, rather 
 | Concurrent read implementation | More Complex (channels, mutex, etc.) | Easier (OS handles concurrent reads) |
 | Persistence after process stop | More complex | Simpler |
 
-While memory streams offer faster read/write speeds, they require more RAM and complex synchronization for concurrent access. Disk files, though slower, use less RAM, are simpler to manage for concurrent reads (handled by the OS), and persist after process termination. To avoid excessive disk usage, output files will be cleaned up after 1 hour.
+While memory streams offer faster read/write speeds, they require more RAM and complex synchronization for concurrent access. Disk files, though slower, use less RAM, are simpler to manage for concurrent reads (handled by the OS), and persist after process termination.
 
 _Note:_ In a production system, we would want a more sophisticated output file management, such as moving them to an external system, and automatic cleanup if disk space gets low. Keeping it simple for this demo
 
-Output files will be created by the `root` user with 600 permissions. The `rpsuser` running jobs will not have write access to any output file, in order to prevent users from messing with these files. Instead, the server will pass an open file descriptor to the child process, which will write to the output file.
+If a user reads output via `rps output` while a process is running, the stream will remain open as long as the process is running. A polling mechanism will be used to read the output file, periodically checking for new content as long as the process is running. Polling was chosen over channel-based or inotify solutions due to the relative simplicity of implementation. This comes with the cost of latency between new output and the user reading it, as well as wasted CPU usage while the process is not generating output. However a longer polling interval (100s of ms) will reduce the CPU usage and is acceptable for this use case. Once the process exits, the output file will be closed and all reading streams will be closed as well.
 
-If a user reads output via `rps output` while a process is runnning, the stream will remain open as long as the process is running. Once the process exits, the output file will be closed and all reading streams will be closed as well.
+The following method will be used to read the output file:
+```go
+GetJobOutput(ctx context.Context, jobID string) (stream io.ReadCloser, err error)
+```
 
 #### Resource Control
 
@@ -149,8 +222,12 @@ Resource control will be implemented using cgroups.
 
 - only cgroups V2 will be supported
 - cgroup setup will be run in priveleged mode on server startup
-- CPU, Memory, Disk IO, and number of PIDs will be limited. 
+- CPU, Memory, and Disk IO to all disks will be limited. 
   - Limit values will be hard-coded for simplicity
+    - The limits per job will be:
+      - cpu.max: 1 CPU core
+      - memory.max: 1 GB
+      - io.max: 10 MB/s
     - _In production, these values should be set by a configuration system such as a config file setting environment variables_
 - Resource limits will be defined per job to ensure that rouge jobs do not affect other jobs
   - Naming convention will be `/sys/fs/cgroup/rpsmanager/<job_id>`
@@ -159,13 +236,12 @@ Resource control will be implemented using cgroups.
 
 ### Security
 
-At a broad level, the security measures here are primarily designed to limit access and prevent resource hogging.
+At a broad level, the security measures here are primarily designed around:
 
 1. API authentication & authorization
-2. Run processes under OS user `rpsuser` with limited access
-3. cgroups for resource limits
+2. cgroups for resource limits
 
-The current design has all users sharing the same process space (via common OS user `rpsuser`), so users with execute permissions can stop other processes and readers can read other process state and output. We primarily rely on authentication to prevent malicious users.
+The current design has all users running processes as root, so users who have execute permissions should know what they're doing.
 
 Some ways this design could be enhanced in the future for stronger isolation with the trade of additional complexity:
 1. Implement mount namespaces, which would isolate the user filesystem from the OS filesystem
