@@ -106,7 +106,7 @@ service RpsService {
   rpc Output(OutputRequest) returns (stream OutputResponse);
 
   // Stops a running job.
-  rpc Stop(StopRequest) returns (StopResponse);
+  rpc Stop(StopRequest) returns (StatusResponse);
 }
 
 // Request message for starting a job.
@@ -117,7 +117,6 @@ message StartRequest {
 // Response message for starting a job.
 message StartResponse {
   string job_id = 1; // The unique identifier (UUID) for the started job.
-  string error_message = 2; // Error message if the job failed to start.
 }
 
 // Enum representing the possible statuses of a job.
@@ -135,12 +134,12 @@ message StatusRequest {
 
 // Response message containing the status of a job.
 message StatusResponse {
-  string job_id = 1;                      // The unique identifier (UUID) of the job.
-  JobStatus status = 2;                   // The current status of the job.
+  string job_id = 1;                        // The unique identifier (UUID) of the job.
+  JobStatus status = 2;                     // The current status of the job.
   google.protobuf.Timestamp start_time = 3; // The time the job was started.
-  string command = 4;                     // The command executed by the job.
-  int32 exit_code = 5;                    // The exit code if the job has stopped or errored. Only meaningful if status is STOPPED or ERROR.
-  string error_message = 6;               // Error message if the job has errored.
+  google.protobuf.Timestamp stop_time = 4;  // The time the job was stopped.
+  string command = 5;                       // The command executed by the job.
+  int32 exit_code = 6;                      // The exit code if the job has stopped or errored. Only meaningful if status is STOPPED or ERROR.
 }
 
 // Request message for streaming the output of a job.
@@ -151,18 +150,11 @@ message OutputRequest {
 // Response message containing a chunk of job output.
 message OutputResponse {
   bytes data = 1; // A chunk of the job's stdout or stderr output.
-  string error_message = 2; // Error message if the output streaming failed.
 }
 
 // Request message for stopping a job.
 message StopRequest {
   string job_id = 1; // The unique identifier (UUID) of the job to stop.
-}
-
-// Response message for stopping a job.
-message StopResponse {
-  bool success = 1; // Whether the job stopping was successful.
-  string error_message = 2; // Error message if the job stopping failed.
 }
 ```
 
